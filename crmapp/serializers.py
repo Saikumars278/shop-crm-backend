@@ -46,7 +46,11 @@ class SaleSerializer(serializers.ModelSerializer):
             "total",
             "discount",
             "gst",
+            "payment_method",
             "status",
+            "razorpay_qr_id",
+            "razorpay_payment_id",
+            "qr_image_url",
             "created_at",
             "items",
         ]

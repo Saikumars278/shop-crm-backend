@@ -1,10 +1,8 @@
-from django.db import models
+from django.db import models, transaction
 from django.db.models.signals import pre_delete
 from django.dispatch import receiver
 from django.utils import timezone
 
-# Single source of truth for the "low stock" cutoff.
-# Use this constant everywhere instead of hardcoding 10 / <=10 / <10 in views.
 LOW_STOCK_THRESHOLD = 10
 
 
@@ -96,9 +94,6 @@ class Product(models.Model):
         default="pcs"
     )
 
-    # NOTE: on Postgres/MySQL, multiple rows with barcode="" will violate a
-    # unique constraint (only NULL is exempt, not empty string). Always save
-    # this as None, never "", when the barcode is blank.
     barcode = models.CharField(
         max_length=100,
         unique=True,
@@ -147,10 +142,14 @@ class Sale(models.Model):
     STATUS_CHOICES = [
         ("Paid", "Paid"),
         ("Pending", "Pending"),
+        ("Failed", "Failed"),
     ]
 
     PAYMENT_CHOICES = [
         ("Cash", "Cash"),
+        ("Card", "Card"),
+        ("UPI", "UPI"),
+        ("UPI QR", "UPI QR"),
     ]
 
     bill_no = models.CharField(
@@ -187,12 +186,78 @@ class Sale(models.Model):
         default="Paid"
     )
 
+    razorpay_qr_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    razorpay_payment_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    razorpay_order_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    qr_image_url = models.TextField(
+        blank=True,
+        null=True
+    )
+
     created_at = models.DateTimeField(
         default=timezone.now
     )
 
+    def mark_as_paid(self, payment_id=None):
+        """
+        Confirms payment idempotently: updates status to Paid, attaches payment_id,
+        and deducts product stock for all items in this bill exactly once.
+        Protected against race conditions and duplicate deductions via select_for_update.
+        """
+        with transaction.atomic():
+            locked_sale = Sale.objects.select_for_update().get(pk=self.pk)
+            if locked_sale.status == "Paid":
+                # Already marked Paid and stock already deducted; prevent double-deduction
+                self.status = "Paid"
+                if payment_id and not locked_sale.razorpay_payment_id:
+                    locked_sale.razorpay_payment_id = payment_id
+                    locked_sale.save(update_fields=["razorpay_payment_id"])
+                    self.razorpay_payment_id = payment_id
+                return
+
+            locked_sale.status = "Paid"
+            if payment_id:
+                locked_sale.razorpay_payment_id = payment_id
+            locked_sale.save(update_fields=["status", "razorpay_payment_id"])
+
+            # Deduct product stock atomically
+            for item in locked_sale.items.select_related("product").all():
+                prod = Product.objects.select_for_update().get(pk=item.product.pk)
+                prod.stock = max(0, prod.stock - item.quantity)
+                prod.save(update_fields=["stock"])
+
+            self.status = "Paid"
+            if payment_id:
+                self.razorpay_payment_id = payment_id
+
+    def mark_as_failed(self):
+        """
+        Marks payment as Failed. Stock is never deducted.
+        """
+        with transaction.atomic():
+            locked_sale = Sale.objects.select_for_update().get(pk=self.pk)
+            if locked_sale.status != "Paid":
+                locked_sale.status = "Failed"
+                locked_sale.save(update_fields=["status"])
+                self.status = "Failed"
+
     def __str__(self):
-        return self.bill_no
+        return f"{self.bill_no} ({self.status})"
 
 
 class SaleItem(models.Model):
@@ -222,19 +287,18 @@ class SaleItem(models.Model):
 
     def save(self, *args, **kwargs):
         if self.pk is None:
-            # New sale item -> deduct stock.
-            self.product.stock -= self.quantity
-            if self.product.stock < 0:
-                self.product.stock = 0
-            self.product.save()
+            # If the sale is already Paid (Cash or Card), deduct stock immediately.
+            # If the sale is Pending (UPI QR awaiting customer scan), do NOT deduct stock yet.
+            if self.sale and self.sale.status == "Paid":
+                self.product.stock -= self.quantity
+                if self.product.stock < 0:
+                    self.product.stock = 0
+                self.product.save()
         else:
-            # Existing sale item being edited -> adjust stock by the
-            # difference between the new and old quantity, instead of
-            # silently ignoring the change.
             old_qty = SaleItem.objects.only("quantity").get(pk=self.pk).quantity
-            diff = self.quantity - old_qty  # positive = selling more, negative = selling less
+            diff = self.quantity - old_qty
 
-            if diff != 0:
+            if diff != 0 and self.sale and self.sale.status == "Paid":
                 self.product.stock -= diff
                 if self.product.stock < 0:
                     self.product.stock = 0
@@ -247,9 +311,9 @@ class SaleItem(models.Model):
 
 
 class ShopSettings(models.Model):
-    shop_name = models.CharField(max_length=255, default="My Supermarket")
-    shop_email = models.EmailField(default="admin@mysupermarket.com")
-    shop_address = models.TextField(default="123 Main St, City")
+    shop_name = models.CharField(max_length=255, default="Sai General Store")
+    shop_email = models.EmailField(default="admin@saigeneralstore.com")
+    shop_address = models.TextField(default="12, Main Road, Nagercoil - 629001")
     gstin = models.CharField(max_length=50, default="29ABCDE1234F1Z5")
     default_tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=18.00)
     pricing_strategy = models.CharField(max_length=50, default="Tax Inclusive")
@@ -268,11 +332,13 @@ class ShopSettings(models.Model):
 def restore_stock_on_delete(sender, instance, **kwargs):
     """
     Restore product stock when a SaleItem is deleted directly, or via
-    cascade when its parent Sale is deleted/voided.
+    cascade when its parent Sale is deleted/voided — ONLY if it was paid
+    and had stock deducted.
     """
-    Product.objects.filter(pk=instance.product_id).update(
-        stock=models.F("stock") + instance.quantity
-    )
+    if instance.sale and instance.sale.status == "Paid":
+        Product.objects.filter(pk=instance.product_id).update(
+            stock=models.F("stock") + instance.quantity
+        )
 
 
 class ShopTarget(models.Model):
@@ -313,3 +379,20 @@ class ShopTarget(models.Model):
 
     def __str__(self):
         return "Shop Dashboard Targets"
+
+
+class PasswordResetOTP(models.Model):
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(default=timezone.now)
+    is_verified = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def is_expired(self):
+        # 10 minute expiration window
+        return (timezone.now() - self.created_at).total_seconds() > 600
+
+    def __str__(self):
+        return f"{self.email} - {self.otp}"
