@@ -20,7 +20,10 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-import razorpay
+try:
+    import razorpay
+except ImportError:
+    razorpay = None
 from django.conf import settings
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.permissions import AllowAny
