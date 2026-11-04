@@ -1,0 +1,253 @@
+/* ==========================================================================
+   Global YouTube-Style Animation System for Django
+   ========================================================================== */
+
+/* 1. YouTube Signature Red Top Loading Progress Bar */
+#yt-progress-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 999999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease-out;
+}
+
+#yt-progress-container.is-active {
+  opacity: 1;
+}
+
+#yt-progress-bar {
+  position: relative;
+  height: 100%;
+  width: 0%;
+  background: #ff0000;
+  box-shadow: 0 0 10px #ff0000, 0 0 5px #ff4e45;
+  transition: width 0.2s cubic-bezier(0.1, 0.7, 0.1, 1);
+}
+
+/* White glowing bead on the tip of the YouTube bar */
+#yt-progress-bar::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -1.5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 8px #ffffff, 0 0 12px #ff0000;
+}
+
+/* Light beam flare leading the bar */
+#yt-progress-bar::before {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 100px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.8));
+  filter: blur(1.5px);
+}
+
+/* 2. Page & Content Entrance Animations */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.page-enter,
+.animate-fade-in-up,
+.fade-in-up {
+  animation: fadeInUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-fade-in,
+.fade-in {
+  animation: fadeIn 0.3s ease-in-out both;
+}
+
+/* Stagger delay classes for dashboard grids and list elements */
+.stagger-1 { animation-delay: 50ms; }
+.stagger-2 { animation-delay: 100ms; }
+.stagger-3 { animation-delay: 150ms; }
+.stagger-4 { animation-delay: 200ms; }
+.stagger-5 { animation-delay: 250ms; }
+
+/* 3. Subtle Hover Animations for Dashboard Cards & Interactive Blocks */
+.card,
+.crm-card,
+.dashboard-card,
+.hover-lift,
+.module,
+.card-interactive {
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.22s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease !important;
+}
+
+.card:hover,
+.crm-card:hover,
+.dashboard-card:hover,
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 8px 10px -6px rgba(0, 0, 0, 0.04);
+}
+
+/* 4. Tactile Feedback for Buttons & Controls */
+button:not(:disabled):active,
+.button:not(:disabled):active,
+input[type="submit"]:not(:disabled):active,
+input[type="button"]:not(:disabled):active,
+.btn:not(:disabled):active,
+a[role="button"]:active {
+  transform: scale(0.97);
+}
+
+button:not(:disabled),
+.button:not(:disabled),
+input[type="submit"]:not(:disabled),
+input[type="button"]:not(:disabled),
+.btn:not(:disabled) {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+}
+
+/* 5. Rotating Loading Animations for Refresh Buttons */
+@keyframes ytSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.is-refreshing svg,
+.is-refreshing i,
+.is-refreshing .icon,
+.refresh-spinning {
+  animation: ytSpin 0.75s linear infinite !important;
+}
+
+/* 6. YouTube Skeleton Shimmer Loading Effect */
+@keyframes youtubeShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.youtube-shimmer,
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    #f1f5f9 0%,
+    #e2e8f0 25%,
+    #cbd5e1 50%,
+    #e2e8f0 75%,
+    #f1f5f9 100%
+  ) !important;
+  background-size: 200% 100% !important;
+  animation: youtubeShimmer 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+  .youtube-shimmer,
+  .skeleton-shimmer {
+    background: linear-gradient(
+      90deg,
+      #1e293b 0%,
+      #334155 25%,
+      #475569 50%,
+      #334155 75%,
+      #1e293b 100%
+    ) !important;
+    background-size: 200% 100% !important;
+  }
+}
+
+.skeleton-box {
+  border-radius: 6px;
+  min-height: 20px;
+}
+
+/* Skeleton Component Helpers */
+.skeleton-card {
+  border-radius: 12px;
+  min-height: 120px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.skeleton-avatar {
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+}
+
+.skeleton-btn {
+  border-radius: 8px;
+  height: 36px;
+  min-width: 100px;
+}
+
+.skeleton-input {
+  border-radius: 8px;
+  height: 40px;
+  width: 100%;
+}
+
+.skeleton-row {
+  height: 44px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+/* 7. Accessibility: Respect prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .youtube-shimmer,
+  .skeleton-shimmer,
+  .is-refreshing svg,
+  .is-refreshing i,
+  .page-enter,
+  .fade-in-up {
+    animation: none !important;
+  }
+
+  .card:hover,
+  .crm-card:hover,
+  .dashboard-card:hover,
+  .hover-lift:hover,
+  button:not(:disabled):active,
+  .btn:not(:disabled):active {
+    transform: none !important;
+  }
+}
+

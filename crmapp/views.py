@@ -422,6 +422,15 @@ def stock_overview(request):
         for p in Product.objects.filter(stock=0).order_by("name")[:5]
     ]
 
+    if total_products == 0:
+        status_text = "Catalog Empty"
+    elif out_of_stock == 0 and low_stock == 0:
+        status_text = "Healthy Inventory"
+    elif out_of_stock > 0:
+        status_text = "Attention Required"
+    else:
+        status_text = "Low Stock Warning"
+
     return Response({
         "available": available,
         "low_stock": low_stock,
@@ -430,7 +439,7 @@ def stock_overview(request):
         "total_products": total_products,
         "utilization": utilization,
         "stock_alert": stock_alert,
-        "status": "Healthy Inventory" if utilization >= 80 else "Attention Required",
+        "status": status_text,
         "chart": chart,
         "low_stock_items": low_stock_items,
         "out_of_stock_items": out_of_stock_items,
@@ -2715,15 +2724,30 @@ def chatbot_api(request):
 
     # 3.5 NEXT MONTH SALES FORECAST & AI RECOMMENDATIONS
     if "next month" in msg or "forecast" in msg or "prediction" in msg or "predict" in msg:
-        reply = (
-            "🔮 **AI Sales Forecast & Strategy for Next Month (November 2026)**:\n\n"
-            "- 💰 **Projected Revenue**: **₹78,554.75** (Range: ₹64,414 – ₹98,193)\n"
-            "- 🧾 **Expected Invoices**: **18 bills** (~₹4,364/bill average)\n"
-            "- 🚀 **Predicted High-Demand Staples**: Atta, Rice 25Kg, Tea Powder, Mineral Water\n"
-            "- ⚠️ **Critical Out-of-Stock Alert**: Aashirvaad Atta and India Gate Rice have 0 stock! Reorder 25–45 units immediately.\n"
-            "- 💵 **Expected Cash Collections**: **₹78,554.75** (100% Cash Settlement rate)\n\n"
-            "View full charts, bundle promotions, and the 4-week execution plan in the AI Forecast Dashboard:"
-        )
+        total_sales_cnt = Sale.objects.count()
+        if total_sales_cnt == 0:
+            reply = (
+                "🔮 **AI Sales Forecast for Next Month**:\n\n"
+                "⚠️ **No Historical Sales Data Available**\n\n"
+                "There are currently no sales recorded in the database. "
+                "Record bills at the checkout counter to generate predictive forecasting, stock alerts, and growth recommendations."
+            )
+        else:
+            nm_num = 1 if today.month == 12 else today.month + 1
+            nm_yr = today.year + 1 if today.month == 12 else today.year
+            nm_name = calendar.month_name[nm_num]
+
+            paid_sales = Sale.objects.filter(status="Paid")
+            tot_rev = float(paid_sales.aggregate(t=Coalesce(Sum("total"), Decimal(0)))["t"])
+            tot_bills = paid_sales.count()
+            out_cnt = Product.objects.filter(stock=0).count()
+
+            reply = (
+                f"🔮 **AI Sales Forecast & Strategy for Next Month ({nm_name} {nm_yr})**:\n\n"
+                f"- 📊 **Historical Analyzed**: **{tot_bills} bills** totaling **₹{tot_rev:,.2f}**\n"
+                f"- ⚠️ **Out-of-Stock Alert**: **{out_cnt} items** currently need replenishment\n\n"
+                f"View complete interactive charts, promotional bundles, and the 4-week execution roadmap in the AI Forecast Dashboard:"
+            )
         return Response({
             "success": True,
             "reply": reply,
@@ -3063,17 +3087,22 @@ def chatbot_api(request):
 # ------------------------------------------------------------------
 #  AI Recommendations for Next Month & Predictive Sales Forecast API
 # ------------------------------------------------------------------
+#  AI Recommendations for Next Month & Predictive Sales Forecast API
+# ------------------------------------------------------------------
 @api_view(["GET"])
 def ai_forecast_api(request):
     """
-    Comprehensive AI predictive intelligence endpoint.
-    Analyzes historical sales, product velocity, payment collections,
-    and margins to generate next month's sales forecast, product recommendations,
-    promotion strategies, payment analysis, and weekly action plan.
+    Comprehensive, data-driven AI predictive intelligence endpoint.
+    Uses actual database sales, payment, and inventory records.
+    Handles empty states gracefully with zero fake data, computes next calendar
+    month forecast using statistically sound recency-weighted modeling,
+    identifies real stock alerts and underperforming inventory, dynamically generates
+    promotional bundle combinations from active store products, and compiles an
+    actionable 4-week execution roadmap.
     """
     today = timezone.localdate()
 
-    # Determine next month
+    # Determine next calendar month
     if today.month == 12:
         next_month_num = 1
         next_month_year = today.year + 1
@@ -3085,9 +3114,20 @@ def ai_forecast_api(request):
     next_month_label = f"{next_month_name} {next_month_year}"
     days_in_next_month = calendar.monthrange(next_month_year, next_month_num)[1]
 
+    # Check database presence
+    total_products_count = Product.objects.count()
+    total_sales_count = Sale.objects.count()
+    paid_sales_qs = Sale.objects.filter(status="Paid")
+    total_paid_sales_count = paid_sales_qs.count()
+
+    # Fall back to all sales if user records without explicit "Paid" status, but prefer Paid
+    sales_qs_for_analysis = paid_sales_qs if total_paid_sales_count > 0 else Sale.objects.all()
+    has_sales = sales_qs_for_analysis.exists()
+    has_products = total_products_count > 0
+
     # 1. HISTORICAL MONTHLY SALES ANALYSIS
     monthly_sales_qs = (
-        Sale.objects.annotate(m=TruncMonth("created_at"))
+        sales_qs_for_analysis.annotate(m=TruncMonth("created_at"))
         .values("m")
         .annotate(
             revenue=Coalesce(Sum("total"), Decimal(0)),
@@ -3102,292 +3142,472 @@ def ai_forecast_api(request):
 
     for item in monthly_sales_qs:
         m_date = item["m"]
+        if not m_date:
+            continue
         rev = float(item["revenue"])
         bills = item["bills"]
         total_hist_rev += Decimal(str(rev))
         total_hist_bills += bills
-        m_label = m_date.strftime("%B %Y")
         historical_months.append({
-            "month": m_label,
+            "month": m_date.strftime("%b %Y"),
+            "month_date": m_date.strftime("%Y-%m"),
             "revenue": round(rev, 2),
             "bills": bills,
             "type": "actual"
         })
 
-    # Historical metrics
-    active_months_count = len([m for m in historical_months if m["revenue"] > 0]) or 1
-    avg_monthly_rev = float(total_hist_rev) / float(active_months_count)
-    avg_monthly_bills = round(total_hist_bills / active_months_count)
-    avg_bill_val = (float(total_hist_rev) / total_hist_bills) if total_hist_bills > 0 else 0.0
+    active_months_count = len(historical_months)
 
-    # 2. NEXT MONTH FORECAST MODELING (Weighted Trend + Baseline)
-    # Give higher weighting to full operating months (e.g. July peak ~111k, June ~48k)
-    weights = [0.35, 0.55, 0.10]  # June, July, Sept
-    weighted_rev = 0.0
-    for i, m in enumerate(historical_months):
-        w = weights[i] if i < len(weights) else (1.0 / len(historical_months))
-        weighted_rev += m["revenue"] * w
-
-    expected_rev = round(max(weighted_rev, avg_monthly_rev * 1.15), 2)
-    conservative_rev = round(expected_rev * 0.82, 2)
-    optimistic_rev = round(expected_rev * 1.25, 2)
-
-    projected_bills = max(15, round(expected_rev / max(avg_bill_val, 1000.0)))
-    projected_avg_bill = round(expected_rev / projected_bills, 2) if projected_bills > 0 else 0.0
-
-    # Add next month forecast point to historical trend
-    trend_data = list(historical_months)
-    trend_data.append({
-        "month": f"{next_month_label} (Forecast)",
-        "revenue": expected_rev,
-        "bills": projected_bills,
-        "type": "forecast",
-        "forecast_min": conservative_rev,
-        "forecast_max": optimistic_rev,
-    })
-
-    # Confidence calculation: based on sample size and consistency
-    confidence_score = 78 if total_hist_bills >= 30 else 60
-
-    # 3. PRODUCT SALES RECOMMENDATIONS (High-Demand vs Underperforming)
-    product_sales_qs = (
-        SaleItem.objects.values(
-            "product__id",
-            "product__name",
-            "product__category",
-            "product__stock",
-            "product__sell_price",
-            "product__buy_price",
-            "product__status"
+    # 2. NEXT MONTH FORECAST MODELING (Actual Data Only, No Fake Hardcoding)
+    if not has_sales or active_months_count == 0 or total_hist_rev <= 0 or total_hist_bills == 0 or total_sales_count == 0:
+        expected_rev = 0.0
+        conservative_rev = 0.0
+        optimistic_rev = 0.0
+        projected_bills = 0
+        projected_avg_bill = 0.0
+        growth_rate_pct = 0.0
+        confidence_score = 0
+        confidence_label = "No Data Available"
+        data_limitation_note = (
+            "No historical sales transactions found. Record bills at the checkout counter "
+            "to generate an accurate predictive forecast."
         )
+        trend_data = []
+    elif active_months_count == 1:
+        # Single month of data: run-rate or full month projection
+        only_month = historical_months[0]
+        is_current_month = only_month["month_date"] == today.strftime("%Y-%m")
+        if is_current_month and today.day > 0:
+            daily_run_rate = float(only_month["revenue"]) / max(1, today.day)
+            expected_rev = round(daily_run_rate * days_in_next_month, 2)
+        else:
+            expected_rev = round(float(only_month["revenue"]), 2)
+
+        conservative_rev = round(expected_rev * 0.85, 2)
+        optimistic_rev = round(expected_rev * 1.15, 2)
+        avg_bill_val = float(only_month["revenue"]) / max(1, only_month["bills"]) if only_month["bills"] > 0 else 0.0
+        projected_bills = max(1, round(expected_rev / max(1.0, avg_bill_val))) if (expected_rev > 0 and only_month["bills"] > 0 and avg_bill_val > 0) else 0
+        projected_avg_bill = round(expected_rev / projected_bills, 2) if projected_bills > 0 else 0.0
+        growth_rate_pct = 0.0
+
+        confidence_score = min(50, 20 + total_hist_bills)
+        confidence_label = "Preliminary Estimate"
+        data_limitation_note = (
+            f"Based on {total_hist_bills} bill(s) recorded in {only_month['month']}. "
+            "Model confidence will increase as more months of sales history accumulate."
+        )
+
+        trend_data = list(historical_months)
+        if expected_rev > 0 or projected_bills > 0:
+            trend_data.append({
+                "month": f"{next_month_name} (Forecast)",
+                "revenue": expected_rev,
+                "bills": projected_bills,
+                "type": "forecast",
+                "forecast_min": conservative_rev,
+                "forecast_max": optimistic_rev,
+            })
+    else:
+        # Multiple months available: recency-weighted trend
+        total_weights = sum(range(1, active_months_count + 1))
+        weighted_rev = sum(historical_months[i]["revenue"] * (i + 1) for i in range(active_months_count)) / total_weights
+
+        # Recent month-over-month trajectory
+        last_m_rev = historical_months[-1]["revenue"]
+        prev_m_rev = historical_months[-2]["revenue"]
+        if prev_m_rev > 0:
+            recent_growth = (last_m_rev - prev_m_rev) / prev_m_rev
+            clamped_growth = max(-0.25, min(0.30, recent_growth))
+        else:
+            clamped_growth = 0.05
+
+        expected_rev = round(max(0.0, weighted_rev * (1.0 + (clamped_growth * 0.5))), 2)
+        conservative_rev = round(expected_rev * 0.85, 2)
+        optimistic_rev = round(expected_rev * 1.20, 2)
+
+        avg_bill_val = (float(total_hist_rev) / total_hist_bills) if total_hist_bills > 0 else 0.0
+        projected_bills = max(1, round(expected_rev / max(1.0, avg_bill_val))) if (expected_rev > 0 and total_hist_bills > 0 and avg_bill_val > 0) else 0
+        projected_avg_bill = round(expected_rev / projected_bills, 2) if projected_bills > 0 else 0.0
+        growth_rate_pct = round(((expected_rev - last_m_rev) / max(1.0, last_m_rev)) * 100, 1)
+
+        # Dynamic confidence score based on transaction volume and span
+        vol_score = 40 if total_hist_bills >= 50 else (25 if total_hist_bills >= 20 else 15)
+        span_score = 35 if active_months_count >= 3 else 20
+        consistency_score = 15
+        confidence_score = min(92, vol_score + span_score + consistency_score)
+        confidence_label = "High Confidence" if confidence_score >= 80 else ("Moderate Confidence" if confidence_score >= 60 else "Preliminary Confidence")
+        data_limitation_note = (
+            f"Forecast analyzed {total_hist_bills} transactions totaling ₹{float(total_hist_rev):,.2f} "
+            f"across {active_months_count} active calendar months ({historical_months[0]['month']} to {historical_months[-1]['month']})."
+        )
+
+        trend_data = list(historical_months)
+        if expected_rev > 0 or projected_bills > 0:
+            trend_data.append({
+                "month": f"{next_month_name} (Forecast)",
+                "revenue": expected_rev,
+                "bills": projected_bills,
+                "type": "forecast",
+                "forecast_min": conservative_rev,
+                "forecast_max": optimistic_rev,
+            })
+
+    daily_target_revenue = round(expected_rev / days_in_next_month, 2) if days_in_next_month > 0 else 0.0
+
+    # 3. REAL INVENTORY & PRODUCT VELOCITY ANALYSIS
+    all_products = list(Product.objects.all().order_by("name"))
+    out_of_stock_list = []
+    low_stock_list = []
+    healthy_stock_list = []
+
+    # Calculate actual sales velocity per product
+    product_sales_stats = (
+        SaleItem.objects.values("product__id")
         .annotate(
             total_sold=Coalesce(Sum("quantity"), 0),
             total_revenue=Coalesce(Sum(F("quantity") * F("price")), Decimal(0))
         )
-        .order_by("-total_sold")
     )
+    sales_map = {item["product__id"]: item for item in product_sales_stats}
 
-    high_demand_products = []
-    sold_product_ids = set()
+    high_demand_candidates = []
+    slow_moving_candidates = []
 
-    for item in product_sales_qs[:6]:
-        pid = item["product__id"]
-        sold_product_ids.add(pid)
-        hist_sold = item["total_sold"]
-        current_stock = item["product__stock"]
-        sell_p = float(item["product__sell_price"])
-        buy_p = float(item["product__buy_price"])
-        margin_pct = round(((sell_p - buy_p) / sell_p * 100), 1) if sell_p > 0 else 0.0
-
-        # Forecast next month demand (velocity scaling)
-        monthly_velocity = hist_sold / max(active_months_count, 1)
-        predicted_sold = max(round(monthly_velocity * 1.2), hist_sold // 2 or 5)
-        projected_rev = round(predicted_sold * sell_p, 2)
-
-        # Reorder analysis
-        if current_stock == 0:
-            urgency = "Critical (Out of Stock)"
-            reorder_needed = predicted_sold + 10  # include 10 units safety stock
-            ai_action = f"0 units in stock! Reorder at least {reorder_needed} units immediately to prevent ₹{projected_rev:,.2f} in lost revenue."
-        elif current_stock <= LOW_STOCK_THRESHOLD:
-            urgency = "High (Low Stock)"
-            reorder_needed = max(0, (predicted_sold - current_stock) + 8)
-            ai_action = f"Only {current_stock} left. Reorder {reorder_needed} units to comfortably meet expected demand."
-        else:
-            urgency = "Healthy Stock"
-            reorder_needed = 0
-            ai_action = f"{current_stock} units available (adequate for ~{round(current_stock / max(monthly_velocity, 1), 1)} months)."
-
-        high_demand_products.append({
-            "id": pid,
-            "name": item["product__name"],
-            "category": item["product__category"],
-            "historical_sold": hist_sold,
-            "predicted_sold": predicted_sold,
-            "current_stock": current_stock,
-            "reorder_needed": reorder_needed,
-            "sell_price": sell_p,
-            "buy_price": buy_p,
-            "margin_percent": margin_pct,
-            "projected_revenue": projected_rev,
-            "urgency": urgency,
-            "ai_action": ai_action
-        })
-
-    # Underperforming Products (0 or low sales with positive stock)
-    underperforming_qs = (
-        Product.objects.filter(stock__gt=0)
-        .exclude(id__in=list(sold_product_ids)[:3])
-        .annotate(total_sold=Coalesce(Sum("saleitem__quantity"), 0))
-        .order_by("total_sold", "-stock")[:5]
-    )
-
-    underperforming_products = []
-    for p in underperforming_qs:
+    for p in all_products:
+        sold_info = sales_map.get(p.id, {"total_sold": 0, "total_revenue": Decimal(0)})
+        hist_sold = int(sold_info["total_sold"])
+        tot_rev = float(sold_info["total_revenue"])
         sell_p = float(p.sell_price)
         buy_p = float(p.buy_price)
+        margin_pct = round(((sell_p - buy_p) / sell_p * 100), 1) if sell_p > 0 else 0.0
         tied_capital = round(buy_p * p.stock, 2)
 
-        if p.total_sold == 0:
-            ai_action = f"Zero sales recorded with ₹{tied_capital:,.2f} tied capital. Place at entrance display or pair in a promotional bundle."
-        else:
-            ai_action = f"Slow rotation ({p.total_sold} units sold). Run a 10% flash discount to recover ₹{tied_capital:,.2f} working capital."
+        # Monthly velocity
+        monthly_velocity = hist_sold / max(active_months_count, 1)
+        predicted_sold = max(1, round(monthly_velocity * 1.15)) if hist_sold > 0 else 0
 
-        underperforming_products.append({
+        # Restock requirement
+        if p.stock == 0:
+            reorder_needed = max(5, predicted_sold + 5)
+            potential_lost_rev = round(reorder_needed * sell_p, 2)
+            ai_action = f"0 units in stock! Reorder at least {reorder_needed} {p.unit} immediately to prevent up to ₹{potential_lost_rev:,.2f} in lost sales."
+            urgency = "Critical (Out of Stock)"
+            out_of_stock_list.append({
+                "id": p.id,
+                "name": p.name,
+                "category": p.category,
+                "unit": p.unit,
+                "current_stock": p.stock,
+                "sell_price": sell_p,
+                "buy_price": buy_p,
+                "margin_percent": margin_pct,
+                "historical_sold": hist_sold,
+                "predicted_sold": predicted_sold,
+                "reorder_needed": reorder_needed,
+                "projected_revenue": potential_lost_rev,
+                "urgency": urgency,
+                "ai_action": ai_action
+            })
+        elif p.stock <= LOW_STOCK_THRESHOLD:
+            reorder_needed = max(0, (predicted_sold - p.stock) + 5)
+            urgency = "High (Low Stock)"
+            ai_action = f"Only {p.stock} {p.unit} remaining. Reorder {reorder_needed} {p.unit} to comfortably meet next month's customer demand."
+            low_stock_list.append({
+                "id": p.id,
+                "name": p.name,
+                "category": p.category,
+                "unit": p.unit,
+                "current_stock": p.stock,
+                "sell_price": sell_p,
+                "buy_price": buy_p,
+                "margin_percent": margin_pct,
+                "historical_sold": hist_sold,
+                "predicted_sold": predicted_sold,
+                "reorder_needed": reorder_needed,
+                "projected_revenue": round(predicted_sold * sell_p, 2),
+                "urgency": urgency,
+                "ai_action": ai_action
+            })
+        else:
+            urgency = "Healthy Stock"
+            ai_action = f"{p.stock} {p.unit} in stock. Adequate inventory for ~{round(p.stock / max(monthly_velocity, 1), 1)} months."
+            healthy_stock_list.append({
+                "id": p.id,
+                "name": p.name,
+                "category": p.category,
+                "unit": p.unit,
+                "current_stock": p.stock,
+                "sell_price": sell_p,
+                "buy_price": buy_p,
+                "margin_percent": margin_pct,
+                "historical_sold": hist_sold,
+                "predicted_sold": predicted_sold,
+                "reorder_needed": 0,
+                "projected_revenue": round(predicted_sold * sell_p, 2),
+                "urgency": urgency,
+                "ai_action": ai_action
+            })
+
+        prod_item = {
             "id": p.id,
             "name": p.name,
             "category": p.category,
-            "historical_sold": p.total_sold,
+            "unit": p.unit,
             "current_stock": p.stock,
             "sell_price": sell_p,
             "buy_price": buy_p,
+            "margin_percent": margin_pct,
+            "historical_sold": hist_sold,
+            "predicted_sold": predicted_sold,
+            "reorder_needed": max(0, predicted_sold - p.stock) if p.stock <= LOW_STOCK_THRESHOLD else 0,
+            "projected_revenue": round(predicted_sold * sell_p, 2),
             "tied_capital": tied_capital,
-            "urgency": "Action Needed",
+            "urgency": urgency,
             "ai_action": ai_action
-        })
+        }
 
-    # 4. SALES INCREASE STRATEGIES: PROMOTIONS, BUNDLES & MARKETING
+        if hist_sold > 0:
+            high_demand_candidates.append(prod_item)
+        if p.stock > 0 and hist_sold <= 2:
+            slow_moving_candidates.append(prod_item)
+
+    # Sort high demand by total sold descending
+    high_demand_candidates.sort(key=lambda x: x["historical_sold"], reverse=True)
+    # Sort slow moving by tied capital descending
+    slow_moving_candidates.sort(key=lambda x: x["tied_capital"], reverse=True)
+
+    high_demand_products = high_demand_candidates[:8]
+    underperforming_products = slow_moving_candidates[:6]
+
+    # 4. DYNAMIC COMBO BUNDLES & STRATEGIES FROM ACTUAL PRODUCTS
+    bundles = []
+    if len(all_products) >= 2:
+        # Bundle 1: Top seller paired with slow mover to clear capital
+        if high_demand_candidates and slow_moving_candidates:
+            top_p = high_demand_candidates[0]
+            slow_p = slow_moving_candidates[0]
+            if top_p["id"] != slow_p["id"]:
+                reg = round(top_p["sell_price"] + slow_p["sell_price"], 2)
+                b_price = round(reg * 0.90, 2)
+                savings = round(reg - b_price, 2)
+                bundles.append({
+                    "title": f"{top_p['name']} + {slow_p['name']} Value Combo",
+                    "products": [top_p["name"], slow_p["name"]],
+                    "regular_price": reg,
+                    "bundle_price": b_price,
+                    "savings": savings,
+                    "discount_pct": 10.0,
+                    "target_outcome": f"Leverages high-demand {top_p['name']} to liquidate slow-moving {slow_p['name']} and recover ₹{slow_p['tied_capital']:,.2f} tied capital."
+                })
+
+        # Bundle 2: Same category or next top sellers
+        cat_map = {}
+        for p in all_products:
+            cat_map.setdefault(p.category, []).append(p)
+
+        cat_combo_added = False
+        for cat, prods in cat_map.items():
+            if len(prods) >= 2 and not cat_combo_added:
+                p1, p2 = prods[0], prods[1]
+                reg = round(float(p1.sell_price) + float(p2.sell_price), 2)
+                b_price = round(reg * 0.92, 2)
+                savings = round(reg - b_price, 2)
+                bundles.append({
+                    "title": f"{cat} Household Saver Pack",
+                    "products": [p1.name, p2.name],
+                    "regular_price": reg,
+                    "bundle_price": b_price,
+                    "savings": savings,
+                    "discount_pct": 8.0,
+                    "target_outcome": f"Increases customer basket size within the {cat} aisle by offering a direct volume discount."
+                })
+                cat_combo_added = True
+                break
+
+        # Bundle 3: Counter impulse / affordable bundle
+        affordable_items = sorted(all_products, key=lambda p: float(p.sell_price))[:2]
+        if len(affordable_items) == 2:
+            p1, p2 = affordable_items[0], affordable_items[1]
+            reg = round(float(p1.sell_price) + float(p2.sell_price), 2)
+            b_price = round(reg * 0.88, 2)
+            savings = round(reg - b_price, 2)
+            bundles.append({
+                "title": f"Quick Counter Combo ({p1.name} + {p2.name})",
+                "products": [p1.name, p2.name],
+                "regular_price": reg,
+                "bundle_price": b_price,
+                "savings": savings,
+                "discount_pct": 12.0,
+                "target_outcome": "High-conversion counter deal to increase impulse purchases before payment checkout."
+            })
+
     sales_strategies = {
-        "bundles": [
-            {
-                "title": "Morning Breakfast & Chai Essentials",
-                "products": ["Tea Powder (KRBL)", "Butter", "Biscuits"],
-                "regular_price": 305.00,
-                "bundle_price": 280.00,
-                "savings": 25.00,
-                "discount_pct": 8.2,
-                "target_outcome": "Drives cross-selling of stagnant Butter and Biscuits by leveraging top-seller Tea Powder."
-            },
-            {
-                "title": "Mega Grocery Pantry Pack",
-                "products": ["Rice 25Kg", "Aashirvaad Atta"],
-                "regular_price": 1960.00,
-                "bundle_price": 1850.00,
-                "savings": 110.00,
-                "discount_pct": 5.6,
-                "target_outcome": "Secures high basket size (>₹1,800) and locks in recurring monthly household staples."
-            },
-            {
-                "title": "Checkout Impulse Hydration Combo",
-                "products": ["Mineral Water", "Potato Chips"],
-                "regular_price": 40.00,
-                "bundle_price": 35.00,
-                "savings": 5.00,
-                "discount_pct": 12.5,
-                "target_outcome": "Increases impulse purchase conversion at POS counter by 15-20%."
-            }
-        ],
+        "bundles": bundles,
         "promotions": [
             {
-                "name": "Weekend Bulk Pantry Discount",
-                "rule": "Flat 5% OFF on orders exceeding ₹2,500",
-                "impact": "Encourages customers to combine trips and purchase higher-ticket grocery bags.",
-                "timing": "Fridays through Sundays"
+                "name": "Weekend Basket Value Discount",
+                "rule": f"Flat 5% OFF on shopping cart orders exceeding ₹{round(projected_avg_bill * 1.5 if projected_avg_bill > 0 else 1000):,}",
+                "impact": "Encourages customers to combine weekly purchases into a single, higher-value checkout.",
+                "timing": "Friday through Sunday"
             },
             {
-                "name": "Slow-Mover Stock Clearance",
-                "rule": "Buy 2 Get 1 Free on Biscuits & Confectionery",
-                "impact": "Liquidates idle inventory to free up warehouse space and cash flow.",
-                "timing": "Second week of the month"
+                "name": "Idle Stock Liquidation Flash",
+                "rule": "10% Clearance on Slow-Moving Items with >10 Units in Stock",
+                "impact": "Converts stagnant warehouse units into liquid cash flow for fast-moving replenishment.",
+                "timing": "Mid-month clearance drive"
             },
             {
-                "name": "Early-Bird Morning Discount",
-                "rule": "Extra ₹10 instant discount between 8:00 AM – 11:00 AM",
-                "impact": "Distributes customer footfall away from peak evening queues.",
-                "timing": "Daily morning hours"
+                "name": "Digital Payment Incentive",
+                "rule": "Instant ₹5 discount on UPI QR payments above ₹200",
+                "impact": "Eliminates physical cash change bottlenecks and speeds up billing queue turnaround.",
+                "timing": "All business hours"
             }
         ],
         "merchandising_tactics": [
-            "Position high-turnover Rice and Flour bags in the rear aisles so customers navigate past impulse snacks and beverages.",
-            "Display promotional bundle signage prominently above the checkout counter.",
-            "Offer digital WhatsApp bills to capture customer phone numbers for seasonal reorder reminders."
+            "Position fast-selling staples in the rear of the store so customer footfall traverses impulse display racks.",
+            "Place high-margin impulse snacks and beverages within arm's reach of the POS counter.",
+            "Display promotional combo deals with visible before-and-after pricing signs at aisle ends."
         ]
     }
 
-    # 5. PAYMENT ANALYSIS & FORECAST
+    # 5. PAYMENT ANALYSIS FROM ACTUAL DATABASE RECORDS
     paid_sales = Sale.objects.filter(status="Paid")
     pending_sales = Sale.objects.filter(status="Pending")
 
     total_paid_amount = float(paid_sales.aggregate(t=Coalesce(Sum("total"), Decimal(0)))["t"])
     total_pending_amount = float(pending_sales.aggregate(t=Coalesce(Sum("total"), Decimal(0)))["t"])
 
-    # Overdue sales (> 30 days pending)
-    overdue_cutoff = today - timedelta(days=30)
+    overdue_cutoff = timezone.now() - timedelta(days=30)
     overdue_sales = pending_sales.filter(created_at__lt=overdue_cutoff)
     total_overdue_amount = float(overdue_sales.aggregate(t=Coalesce(Sum("total"), Decimal(0)))["t"])
 
-    # Payment collections forecast
-    total_sales_val = total_paid_amount + total_pending_amount
-    collection_efficiency = round((total_paid_amount / total_sales_val * 100), 1) if total_sales_val > 0 else 100.0
+    total_billed = total_paid_amount + total_pending_amount
+    collection_efficiency = round((total_paid_amount / total_billed * 100), 1) if total_billed > 0 else 100.0
 
-    # Next month expected collections = Projected sales * collection rate + any pending receivables
-    expected_collections = round(expected_rev * (collection_efficiency / 100.0) + (total_pending_amount * 0.75), 2)
+    # Real payment method distribution
+    pm_stats = (
+        paid_sales.values("payment_method")
+        .annotate(
+            amount=Coalesce(Sum("total"), Decimal(0)),
+            count=Count("id")
+        )
+        .order_by("-amount")
+    )
+
+    payment_methods_list = []
+    for pm in pm_stats:
+        m_name = pm["payment_method"] or "Cash"
+        m_amt = float(pm["amount"])
+        m_count = pm["count"]
+        pct = round((m_amt / total_paid_amount * 100), 1) if total_paid_amount > 0 else 0.0
+        payment_methods_list.append({
+            "method": m_name,
+            "amount": round(m_amt, 2),
+            "count": m_count,
+            "percentage": pct
+        })
+
+    # Expected next month collections based on projected sales + realistic receivables recovery
+    expected_collections = round(expected_rev * (collection_efficiency / 100.0) + (total_pending_amount * 0.5), 2)
+    daily_inflow_est = round(expected_collections / days_in_next_month, 2) if days_in_next_month > 0 else 0.0
+
+    cash_pct = next((pm["percentage"] for pm in payment_methods_list if pm["method"] == "Cash"), 0.0)
+    if not has_sales:
+        cashflow_health = "No Payment Records"
+        payment_rec = "Record sales with payment methods (Cash, UPI QR, Card) to monitor collections and cashflow."
+    elif total_pending_amount == 0 and collection_efficiency >= 98:
+        cashflow_health = "Excellent (100% Realized Collections)"
+        if cash_pct > 75:
+            payment_rec = f"{cash_pct}% of payments are settled in Cash. Promoting UPI QR code display at the counter will reduce cash-handling time and capture tech-savvy shoppers."
+        else:
+            payment_rec = "Healthy payment mix across Cash and Digital channels with zero outstanding customer debt."
+    else:
+        cashflow_health = "Action Required on Receivables"
+        payment_rec = f"You have ₹{total_pending_amount:,.2f} in unpaid bills. Follow up on overdue accounts to maintain working capital liquidity."
 
     payment_analysis = {
         "total_payments_received": round(total_paid_amount, 2),
+        "total_paid_bills": paid_sales.count(),
         "pending_payments": round(total_pending_amount, 2),
         "pending_count": pending_sales.count(),
         "overdue_payments": round(total_overdue_amount, 2),
         "overdue_count": overdue_sales.count(),
         "collection_efficiency_pct": collection_efficiency,
         "expected_next_month_collections": expected_collections,
-        "daily_inflow_estimate": round(expected_collections / days_in_next_month, 2),
-        "payment_methods": [
-            {"method": "Cash", "amount": round(total_paid_amount, 2), "percentage": 100.0}
-        ],
-        "cashflow_health": "Excellent (100% Cash Settlement)" if total_pending_amount == 0 else "Action Required on Receivables",
-        "strategic_recommendation": (
-            "100% of historical transactions were settled in Cash. Introducing UPI QR code / Card POS at checkout "
-            "will eliminate cash handling friction, reduce counter wait times, and capture high-spending digital customers."
-        )
+        "daily_inflow_estimate": daily_inflow_est,
+        "payment_methods": payment_methods_list,
+        "cashflow_health": cashflow_health,
+        "strategic_recommendation": payment_rec
     }
 
-    # 6. ACTIONABLE AI EXECUTION PLAN (Phased 4-Week Roadmap)
+    # 6. DYNAMIC 4-WEEK ACTION PLAN BASED ON ACTUAL REAL DATA
+    week1_items = []
+    if out_of_stock_list:
+        top_out = out_of_stock_list[:2]
+        out_names = " and ".join(f"{p['name']} ({p['reorder_needed']} units)" for p in top_out)
+        week1_items.append(f"Urgent Replenishment: Reorder {out_names} currently at 0 shelf stock.")
+    if low_stock_list:
+        low_names = ", ".join(p['name'] for p in low_stock_list[:2])
+        week1_items.append(f"Restock low-inventory items: {low_names} before weekend sales peak.")
+    if not week1_items:
+        week1_items.append("Inventory Audit: All products have active stock. Conduct cycle counts on top revenue categories.")
+    week1_items.append("Review expiry dates on fresh and packaged inventory to eliminate waste.")
+
+    week2_items = []
+    if bundles:
+        week2_items.append(f"Launch the '{bundles[0]['title']}' at checkout counter with promotional pricing.")
+    else:
+        week2_items.append("Design promotional bundles for cross-selling related household items.")
+    week2_items.append("Set up high-margin impulse snacks and beverages near the billing counter.")
+    week2_items.append("Train billing staff to suggest complementary combo items on every checkout bill.")
+
+    week3_items = [
+        f"Mid-Month Audit: Measure actual revenue against the ₹{round(expected_rev * 0.5):,.2f} mid-month benchmark.",
+        "Reconcile daily UPI and card settlement records with bank statements.",
+        "Follow up on any pending customer invoices to maintain healthy cash collection efficiency."
+    ]
+
+    week4_items = []
+    if underperforming_products:
+        slow_item = underperforming_products[0]
+        week4_items.append(f"Run a 10% clearance on {slow_item['name']} to unlock ₹{slow_item['tied_capital']:,.2f} in working capital.")
+    else:
+        week4_items.append("Review slow-moving items and optimize shelf space for top revenue contributors.")
+    week4_items.append(f"Reconcile end-of-month collections against the target of ₹{expected_rev:,.2f}.")
+    week4_items.append("Prepare supplier purchase orders and verify delivery schedules for the upcoming month.")
+
     action_plan = [
         {
             "week": "Week 1 (Days 1–7)",
-            "title": "Supply Chain Replenishment & Stock Safety",
+            "title": "Supply Chain & Stock Safety",
             "priority": "High Priority",
-            "items": [
-                f"Urgent: Reorder 45 units of Aashirvaad Atta and 35 units of India Gate Rice (currently 0 stock).",
-                "Conduct a physical cycle count on top 10 revenue-driving staples.",
-                "Review expiry dates on dairy and fresh items to minimize spoilage."
-            ]
+            "items": week1_items
         },
         {
             "week": "Week 2 (Days 8–14)",
-            "title": "Promotions, Bundles & Merchandising Launch",
+            "title": "Promotions, Bundles & Merchandising",
             "priority": "Medium Priority",
-            "items": [
-                "Launch the Morning Breakfast Combo (Tea Powder + Butter + Biscuits) with counter shelf-talkers.",
-                "Set up the impulse snack basket near the cash register with ₹20–₹40 items.",
-                "Train cashiers to suggest the hydration combo (Water + Chips) on every bill."
-            ]
+            "items": week2_items
         },
         {
             "week": "Week 3 (Days 15–21)",
-            "title": "Mid-Month Sales Volume Push & Payment Modernization",
+            "title": "Mid-Month Sales Benchmark & Collections",
             "priority": "Medium Priority",
-            "items": [
-                f"Audit sales pace against the mid-month benchmark goal of ₹{round(expected_rev * 0.5):,.2f}.",
-                "Set up and test a UPI QR display stand at checkout to capture digital transactions.",
-                "Promote bulk staple packs (Rice 25Kg) for household month-end restocks."
-            ]
+            "items": week3_items
         },
         {
             "week": "Week 4 (Days 22–30)",
-            "title": "Slow-Stock Clearance & Performance Audit",
+            "title": "Stock Clearance & Performance Audit",
             "priority": "Strategic",
-            "items": [
-                "Run a 10% clearance discount on slow-moving inventory (Butter, Biscuits) to free up working capital.",
-                f"Reconcile total cash collections against the ₹{expected_rev:,.2f} forecast target.",
-                "Review supplier lead times and prepare the replenishment list for the subsequent month."
-            ]
+            "items": week4_items
         }
     ]
 
     return Response({
         "success": True,
+        "has_data": has_sales or has_products,
+        "has_sales": has_sales,
+        "has_products": has_products,
         "forecast_period": {
             "month_name": next_month_name,
             "year": next_month_year,
@@ -3404,14 +3624,21 @@ def ai_forecast_api(request):
             "historical_total_revenue": round(float(total_hist_rev), 2),
             "historical_total_bills": total_hist_bills,
             "confidence_score": confidence_score,
-            "confidence_label": "High Confidence" if confidence_score >= 80 else ("Moderate Confidence" if confidence_score >= 65 else "Preliminary Confidence"),
-            "data_limitation_note": (
-                f"Forecast model analyzed {total_hist_bills} transactions totaling ₹{float(total_hist_rev):,.2f} recorded "
-                f"across {active_months_count} active operating months (June–September 2026). Forecast confidence will progressively "
-                "increase as daily transaction density expands."
-            )
+            "confidence_label": confidence_label,
+            "data_limitation_note": data_limitation_note,
+            "growth_rate_pct": growth_rate_pct,
+            "daily_target_revenue": daily_target_revenue,
+            "active_months_count": active_months_count
         },
         "trend_data": trend_data,
+        "inventory_alerts": {
+            "out_of_stock_count": len(out_of_stock_list),
+            "low_stock_count": len(low_stock_list),
+            "healthy_stock_count": len(healthy_stock_list),
+            "total_products_count": total_products_count,
+            "out_of_stock_items": out_of_stock_list,
+            "low_stock_items": low_stock_list
+        },
         "product_recommendations": {
             "high_demand_products": high_demand_products,
             "underperforming_products": underperforming_products
@@ -3420,3 +3647,4 @@ def ai_forecast_api(request):
         "payment_analysis": payment_analysis,
         "action_plan": action_plan
     })
+

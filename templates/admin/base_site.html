@@ -1,0 +1,9 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block extrahead %}
+{{ block.super }}
+<link rel="stylesheet" href="{% static 'css/global-animations.css' %}">
+<script src="{% static 'js/global-animations.js' %}"></script>
+{% endblock %}
+

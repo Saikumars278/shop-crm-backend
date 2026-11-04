@@ -1,0 +1,30 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Shop CRM{% endblock %}</title>
+
+  <!-- Global YouTube-Style Animations & Transitions -->
+  <link rel="stylesheet" href="{% static 'css/global-animations.css' %}">
+
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="crm-body">
+  <!-- YouTube Signature Top Loading Progress Bar -->
+  <div id="yt-progress-container" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div id="yt-progress-bar"></div>
+  </div>
+
+  <!-- Main Page Layout Container with Smooth Fade-in and Slide-up Transition -->
+  <main id="main-content" class="page-enter">
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Universal YouTube-Style Interceptors & Dynamic Loader Engine -->
+  <script src="{% static 'js/global-animations.js' %}"></script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>
+
